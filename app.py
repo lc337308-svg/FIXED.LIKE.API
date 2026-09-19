@@ -251,7 +251,7 @@ async def send_until_2000_success(tokens, uid, server_name, target_success=2000)
     connector = aiohttp.TCPConnector(limit=0)
     total_success = 0
     total_sent = 0
-    player_info = None
+    player_info = {}
 
     async with aiohttp.ClientSession(connector=connector) as session:
         encrypted = encrypt_api("08" + Encrypt_ID(str(uid)) + "1801")
@@ -266,12 +266,12 @@ async def send_until_2000_success(tokens, uid, server_name, target_success=2000)
             results = await asyncio.gather(*tasks)
 
             for success, response in results:
-                if success and response is not None and player_info is None:
+                if success and response is not None and not player_info:
                     parsed = decode_protobuf(response)
                     if parsed:
                         try:
                             info_json = json.loads(MessageToJson(parsed))
-                            player_info = info_json.get('AccountInfo', {})
+                            player_info = info_json.get('AccountInfo', {}) or info_json
                         except Exception:
                             pass
 
@@ -319,7 +319,8 @@ def handle_like_requests():
 
     try:
         before_data = json.loads(MessageToJson(before))
-        before_like = int(before_data['AccountInfo'].get('Likes', 0))
+        acc_info = before_data.get('AccountInfo', {})
+        before_like = int(acc_info.get('Likes', 0))
     except Exception:
         return jsonify({"status": 500, "error": "Protobuf Response Parsing Failure", "response_code": 0}), 200
 
@@ -336,9 +337,10 @@ def handle_like_requests():
 
     try:
         after_data = json.loads(MessageToJson(after))
-        after_like = int(after_data['AccountInfo']['Likes'])
-        player_id = int(after_data['AccountInfo']['UID'])
-        player_name = str(after_data['AccountInfo']['PlayerNickname'])
+        after_acc = after_data.get('AccountInfo', {})
+        after_like = int(after_acc.get('Likes', 0))
+        player_id = int(after_acc.get('UID', uid))
+        player_name = str(after_acc.get('PlayerNickname', 'Unknown'))
 
         like_given = after_like - before_like
         response_code = 1 if like_given > 0 else 2
@@ -377,20 +379,38 @@ def send_visits_route():
 
     tokens = load_tokens(server_name)
     if not tokens:
-        return jsonify({"status": 500, "error": f"No valid tokens found for {server_name}"}), 500
+        accounts = load_accounts(server_name) or load_accounts("IND")
+        if accounts:
+            for acc in accounts[:20]:
+                t = asyncio.run(get_valid_token(acc['uid'], acc['password']))
+                if t:
+                    tokens.append(t)
+
+    if not tokens:
+        return jsonify({"status": 500, "error": f"No valid accounts or tokens found for {server_name}"}), 500
 
     target_success = 2000
     total_success, total_sent, player_info = asyncio.run(send_until_2000_success(tokens, uid, server_name, target_success))
+
+    # Detailed info extraction
+    nickname = player_info.get("PlayerNickname") or player_info.get("nickname") or "Unknown"
+    region = player_info.get("PlayerRegion") or player_info.get("region") or server_name
+    likes = player_info.get("Likes") or player_info.get("likes") or 0
+    level = player_info.get("Levels") or player_info.get("level") or player_info.get("Level") or 0
+    rank = player_info.get("BRRank") or player_info.get("Rank") or player_info.get("brRank") or "N/A"
+    cs_rank = player_info.get("CSRank") or player_info.get("csRank") or "N/A"
 
     return jsonify({
         "status": "SUCCESS",
         "uid": int(uid),
         "success": total_success,
         "fail": max(target_success - total_success, 0),
-        "nickname": player_info.get("PlayerNickname", "Unknown") if player_info else "Unknown",
-        "region": player_info.get("PlayerRegion", server_name) if player_info else server_name,
-        "likes": player_info.get("Likes", 0) if player_info else 0,
-        "level": player_info.get("Levels", 0) if player_info else 0
+        "nickname": nickname,
+        "region": region,
+        "likes": likes,
+        "level": level,
+        "br_rank": rank,
+        "cs_rank": cs_rank
     })
 
 @app.route('/autolike', methods=['GET'])
@@ -462,12 +482,30 @@ def get_info_bot_data():
 
     try:
         info_json = json.loads(MessageToJson(info))
+        account_data = info_json.get('AccountInfo', info_json)
+        
+        # Comprehensive fallback extraction for profile fields
+        nickname = account_data.get('PlayerNickname') or account_data.get('nickname', 'Unknown')
+        level = account_data.get('Levels') or account_data.get('level', 0)
+        likes = account_data.get('Likes') or account_data.get('likes', 0)
+        br_rank = account_data.get('BRRank') or account_data.get('rank', 'N/A')
+        cs_rank = account_data.get('CSRank') or account_data.get('csRank', 'N/A')
+        region = account_data.get('PlayerRegion') or account_data.get('region', server_name)
+        
         return jsonify({
             "status": "SUCCESS",
-            "data": info_json['AccountInfo']
+            "nickname": nickname,
+            "uid": int(uid),
+            "level": level,
+            "likes": likes,
+            "br_rank": br_rank,
+            "cs_rank": cs_rank,
+            "region": region,
+            "full_data": account_data
         })
     except Exception as e:
         return jsonify({"status": 500, "error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    
